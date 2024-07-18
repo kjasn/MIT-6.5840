@@ -36,7 +36,7 @@ check-%:
 plugin:
 	cd src/main && go build -buildmode=plugin ../mrapps/wc.go
 
-coordinator: plugin
+coordinator: plugin clean
 	cd src/main && go run mrcoordinator.go pg-*.txt 
 
 worker: plugin
@@ -46,7 +46,7 @@ test:
 	cd src/main && bash test-mr.sh
 
 clean:
-	rm -r src/main/tmp || rm src/main/mr-out*
+	rm -r src/main/mr-tmp-* || rm src/main/mr-out*
 
 res:
 	cat src/main/mr-out-* | sort | more

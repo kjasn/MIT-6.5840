@@ -46,7 +46,8 @@ type Coordinator struct {
 	Buff          [][]string // map reduce task id to files
 	TaskID        int        // record the next id, start with 0
 	NReduce       int        // count of reduce tasks
-	Finished      int        // finished reduce tasks
+	FinishedMapTasks	int 
+	FinishedReduceTasks      int        // finished reduce tasks
 	Phrase        TaskType   // job phrase, map OR reduce
 }
 
@@ -72,7 +73,8 @@ func (c *Coordinator) TaskAssign(args *TaskArgs, reply *TaskReply) error {
 	var task *Task
 
 	if c.Phrase == MapTask {
-		if len(c.ReduceTaskQue) == c.NReduce { // all map done
+		// if len(c.ReduceTaskQue) == c.NReduce { // all map done
+		if c.FinishedMapTasks == len(c.Files){
 			return fmt.Errorf("all map tasks Done")
 		}
 		task = <-c.MapTaskQue
@@ -90,17 +92,20 @@ func (c *Coordinator) TaskAssign(args *TaskArgs, reply *TaskReply) error {
 	task.Status = taskAssigned
 	reply.Task = task
 	reply.Phrase = c.Phrase
+	// log.Printf(">>> Assign a task: %#v", *task)
 	return nil
 }
-
 func (c *Coordinator) TaskFeedback(args *TaskArgs, reply *TaskReply) error {
 	if !args.Status { // fail
 		// add failed task back
 		// TODO: delete failed worker tmp files: mr-tmp-reply.Task.TaskID-*
 		if c.Phrase == MapTask {
-			c.MapTaskQue <- reply.Task
+			// c.MapTaskQue <- reply.Task
+			c.MapTaskQue <- args.Task
+			log.Printf(">>> Coordinator: map task fail: %#v", args.Task)
 		} else {
-			c.ReduceTaskQue <- reply.Task
+			c.ReduceTaskQue <- args.Task
+			log.Printf(">>> Coordinator: reduce task fail: %#v", args.Task)
 		}
 		// q, _ := c.selectQue(args.Type) // ignore err
 		// q <- reply.Task
@@ -112,24 +117,25 @@ func (c *Coordinator) TaskFeedback(args *TaskArgs, reply *TaskReply) error {
 			// set reduce task
 			// fs := []string{}
 			for i := 0; i < c.NReduce; i++ {
-				c.Buff[i] = append(c.Buff[i], fmt.Sprintf("mr-tmp-%d-%d", reply.Task.TaskID, i))
+				c.Buff[i] = append(c.Buff[i], fmt.Sprintf("mr-tmp-%d-%d", args.Task.TaskID, i))
 			}
 
-			task := &Task{
-				TaskID:    c.generateID(),
-				Type:      ReduceTask,
-				Status:    taskPending,
-				FileSlice: &c.Buff[reply.Task.TaskID],
-			}
-			c.ReduceTaskQue <- task
-			if len(c.ReduceTaskQue) == c.NReduce {
+			c.FinishedMapTasks++
+			// if len(c.ReduceTaskQue) == c.NReduce {
+			if c.FinishedMapTasks == len(c.Files) {
 				c.Phrase = ReduceTask // next phrase
+				log.Printf("Step into Reduce Phrase")
 			}
 		} else {
-			c.Finished++
+			c.FinishedReduceTasks++
 		}
 
 		reply.Phrase = c.Phrase
+		if reply.Phrase == MapTask {
+			log.Println("Current is Map Phrase")
+		} else {
+			log.Println("Current is Reduce Phrase")
+		}
 	}
 
 	return nil
@@ -161,7 +167,7 @@ func (c *Coordinator) server() {
 // if the entire job has taskCompleted.
 func (c *Coordinator) Done() bool {
 	// Your code here.
-	return c.Finished == c.NReduce
+	return c.FinishedReduceTasks == c.NReduce
 }
 
 // create a Coordinator.
@@ -176,7 +182,8 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		Buff:          make([][]string, nReduce),
 		TaskID:        0,
 		NReduce:       nReduce,
-		Finished:      0,
+		FinishedReduceTasks:      0,
+		FinishedMapTasks: 0,
 		Phrase:        MapTask,
 	}
 
@@ -187,9 +194,21 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 			TaskID:    c.generateID(),
 			FileSlice: &[]string{file}, // 1 file
 			Status:    taskPending,
+			NReduce: c.NReduce,
 		}
 		c.MapTaskQue <- task
 		// log.Printf("make coordinator add a map task %#v", *c.mapTasks[mapTaskID])
+	}
+
+	// add reduce tasks
+	for i := 0; i < c.NReduce; i++ {
+		task := &Task{
+			TaskID:    c.generateID(),
+			Type:      ReduceTask,
+			Status:    taskPending,
+			FileSlice: &c.Buff[i],
+		}
+		c.ReduceTaskQue <- task
 	}
 
 	c.server()

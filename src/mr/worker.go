@@ -47,6 +47,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		case MapTask:
 			call("Coordinator.TaskAssign", args, reply)
 			go doMapTask(args, reply, mapf)
+			log.Printf(">>> after a map task: %#v", reply)
 		case ReduceTask:
 			call("Coordinator.TaskAssign", args, reply)
 			go doReduceTask(args, reply, reducef)
@@ -109,6 +110,7 @@ func writeToLocalFiles(
 	}
 	// successfully finish
 	done <- struct{}{}
+	// log.Printf(">>> Worker: after write: %#v", *reply.Task)
 }
 
 func doMapTask(args *TaskArgs, reply *TaskReply,
@@ -197,6 +199,8 @@ func timer(args *TaskArgs, reply *TaskReply, done chan struct{}) {
 		args.Status = false // task failed, worker crashed
 	}
 
+	// log.Printf(">>> Worker: before call back, reply's task is: %#v", *reply.Task)
+	args.Task = reply.Task
 	call("Coordinator.TaskFeedback", args, reply)
 }
 
