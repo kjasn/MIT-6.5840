@@ -26,11 +26,14 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 type TaskArgs struct {
-
+	// Type   TaskType // map task  OR  reduce task
+	Status bool // serve as if task finished successfully while feedback
+	// Phrase TaskType // job phrase, map OR reduce
 }
 
 type TaskReply struct {
-	Task *Task
+	Task   *Task
+	Phrase TaskType // job phrase, map OR reduce
 }
 
 // Cook up a unique-ish UNIX-domain socket name

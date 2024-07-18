@@ -2,3 +2,10 @@ pkg/
 api.key
 .api.key.trimmed
 *-handin.tar.gz
+
+# Editor config file
+.vscode/
+
+# output files
+mr-out-*
+mr-tmp-*

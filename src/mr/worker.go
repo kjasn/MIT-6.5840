@@ -1,22 +1,19 @@
 package mr
 
 import (
-	"bufio"
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io"
 	"log"
 	"net/rpc"
 	"os"
-	"path/filepath"
 	"sort"
-	"strings"
+	"strconv"
 	"time"
 )
 
-//
 // Map functions return a slice of KeyValue.
-//
 type KeyValue struct {
 	Key   string
 	Value string
@@ -30,93 +27,39 @@ func (a ByKey) Len() int           { return len(a) }
 func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
-//
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
-//
 func ihash(key string) int {
 	h := fnv.New32a()
 	h.Write([]byte(key))
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
-type WorkerStatus int
-const (
-	workerIdle WorkerStatus = iota
-	workerWorking 
-	workerOffline
-)
-//
 // main/mrworker.go calls this function.
-//
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
-	mapArgs, mapReply := &TaskArgs{}, &TaskReply{}
-	for {
-		if ok := call("Coordinator.TaskAssign", mapArgs, mapReply); !ok {
-			break
+	args, reply := &TaskArgs{Status: true}, &TaskReply{}
+	flag := true
+	for flag {
+		switch reply.Phrase {
+		case MapTask:
+			call("Coordinator.TaskAssign", args, reply)
+			go doMapTask(args, reply, mapf)
+		case ReduceTask:
+			call("Coordinator.TaskAssign", args, reply)
+			go doReduceTask(args, reply, reducef)
+		default:
+			os.Exit(0)
 		}
-
-		go mapPhrase(mapArgs, mapReply)
 	}
 
-	// // map phrase
-	// for {
-	// 	// return false denotes no more map tasks
-	// 	callTask(mapf)
-		
-	// }
-	// // log.Println(">>> map finished")
-
-
-	// // reduce phrase
-	// reduceArgs, reduceReply := &ReduceArgs{WorkerID: mapArgs.WorkerID}, &ReduceReply{}
-	// // for *(mapReply.remainMapTasks) == 0 {
-	// for {
-	// 	if ok := call("Coordinator.ReduceTaskAssign", reduceArgs, reduceReply); !ok {
-	// 		break
-	// 	}
-	// 	done := make(chan struct{})
-	// 	go reduceEmit(reduceReply, reducef, done)
-	// 	reduceArgs.TaskID = reduceReply.Task.TaskID
-	// 	select {
-	// 	case <- done:
-	// 		reduceArgs.TaskStatus = taskCompleted	// task finished
-	// 	case <- time.After(timeOut):
-	// 		// task fail as time out 
-	// 		log.Println(">>> times out")
-	// 		reduceArgs.TaskStatus = taskPending	// task fail, set free
-	// 	}
-	// 	call("Coordinator.ReduceTaskFeedback", reduceArgs, reduceReply)
-	// }
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
 }
 
-func callTask(mapf func(string, string) []KeyValue) {
-	taskArgs, taskReply := &TaskArgs{}, &TaskReply{}
-	if ok := call("Coordinator.TaskAssign", taskArgs, taskReply); !ok {
-		log.Fatal("Worker: task distribute fail")
-	}
-	// log.Printf(">>> Worker: Received mapReply: %+v", mapReply.Task) // New log
-
-	done := make(chan struct{})
-	go writeToLocalFiles(taskReply, mapf, done)
-	select {
-	case <- done:
-		taskArgs.TaskStatus = taskCompleted	// task finished
-	case <- time.After(timeOut):
-		// task fail as time out 
-		log.Println(">>> times out")
-		taskArgs.TaskStatus = taskPending	// task fail, set free
-	}
-	call("Coordinator.MapTaskFeedback", mapArgs, mapReply)
-}
-
-func readFile(filename string) []byte{
+func readFile(filename string) []byte {
 	file, err := os.Open(filename)
 	if err != nil {
 		log.Fatalf("cannot open %v, err: %s", filename, err.Error())
@@ -129,101 +72,137 @@ func readFile(filename string) []byte{
 	return content
 }
 
-func mapPhrase(args *TaskArgs, reply *TaskReply) {
-	
-}
-
-func writeToLocalFiles(taskReply *TaskReply, mapf func(string, string) []KeyValue, done chan struct{}) {
-	content := readFile(taskReply.Task.FileName)
-	intermediate := mapf(taskReply.Task.FileName, string(content))
+func writeToLocalFiles(
+	reply *TaskReply,
+	mapf func(string, string) []KeyValue,
+	done chan struct{},
+) {
+	readFrom := (*reply.Task.FileSlice)[0]
+	content := readFile(readFrom)
+	intermediate := mapf(readFrom, string(content))
 
 	sort.Sort(ByKey(intermediate))
 	// write intermediate kvs to local file
-	buff := map[int]ByKey{}
-	nReduce := taskReply.Task.NReduce
+	// buff := map[int]ByKey{}
+	nReduce := reply.Task.NReduce
+	// store temp kvs to write to temp files
+	buff := make([][]ByKey, nReduce)
+
 	for _, kv := range intermediate {
 		idx := ihash(kv.Key) % nReduce
-		buff[idx] = append(buff[idx], kv)
+		buff[idx] = append(buff[idx], ByKey{kv})
 	}
 
-	localFiles := []string{}
 	for i := 0; i < nReduce; i++ {
-		filename := fmt.Sprintf("map-tmp-%d", i)
-		writeFile(i, buff[i])
-		localFiles = append(localFiles, filename)
-	} 
-	taskReply.LocalFiles = localFiles
-	// log.Println(">>> map emit: nReduce is ", nReduce)
-
-	// create tmp dir
-	// tmpDir := filepath.Join("..", "main", "tmp")
-	// os.MkdirAll(tmpDir, 0755)
-
-	// tmpFiles := []*os.File{}
-	// for i := 0; i < nReduce; i++ {
-	// 	oname := filepath.Join(tmpDir, fmt.Sprintf("map-out-%d-%d", mapReply.Task.WorkerID, i))
-	// 	ofile, err := os.Create(oname)
-	// 	if err != nil {
-	// 		log.Fatalf("can not create file: %s\n", oname)
-	// 	}
-	// 	// log.Printf(">>> map emit: created a file %s", oname)
-	// 	tmpFiles = append(tmpFiles, ofile)
-	// 	defer ofile.Close()
-	// }
-
-	// // shuffle intermediate data
-	// for i := 0; i < len(intermediate); i++ {
-	// 	idx := ihash(intermediate[i].Key) % nReduce
-	// 	ofile := tmpFiles[idx]
-	// 	fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, intermediate[i].Value)
-	// }
-
-	done <- struct{}{}
-}
-
-func reduceEmit(reduceReply *ReduceReply, reducef func(string, []string) string, done chan struct{}) {
-	tmpDir := filepath.Dir(".")
-	oname := filepath.Join(filepath.Join(tmpDir, "tmp"), reduceReply.Task.Filename)
-
-	ofile, err := os.Open(oname)
-	if err != nil {
-		log.Fatalf("cannot open %v, err: %s", oname, err.Error())
-	}
-	defer ofile.Close()
-
-	intermediate := make(map[string][]string)
-	scanner := bufio.NewScanner(ofile)
-	for scanner.Scan() {
-		line := scanner.Text()
-		parts := strings.Fields(line)
-		if len(parts) == 2 {
-			key, value := parts[0], parts[1]
-			intermediate[key] = append(intermediate[key], value)
+		// mr-tmp-taskID-seqNum
+		oname := "mr-tmp-" + strconv.Itoa(reply.Task.TaskID) + "-" + strconv.Itoa(i)
+		ofile, _ := os.Create(oname)
+		// write to temp file in json style
+		enc := json.NewEncoder(ofile)
+		for _, kv := range buff[i] {
+			err := enc.Encode(kv)
+			if err != nil {
+				return
+			}
 		}
+		ofile.Close()
 	}
-
-	parts := strings.Split(oname, "-")
-	if len(parts) < 4 {
-		log.Fatalf("invalid filename format: %s", oname)
-	}
-	dest := fmt.Sprintf("mr-out-%s", parts[3])
-	destFile, err := os.Create(dest)
-	if err != nil {
-		log.Fatal("can not create file: ", dest)
-	}
-	// log.Println("created a file: ", dest)
-	for k, v := range intermediate {
-		output := reducef(k, v)
-		fmt.Fprintf(destFile, "%v %v\n", k, output)
-	}
+	// successfully finish
 	done <- struct{}{}
 }
 
-//
+func doMapTask(args *TaskArgs, reply *TaskReply,
+	mapf func(string, string) []KeyValue) {
+
+	done := make(chan struct{})
+	go writeToLocalFiles(reply, mapf, done)
+
+	// check if time out and call feedback to tell coordinator
+	timer(args, reply, done)
+}
+
+func doReduceTask(args *TaskArgs, reply *TaskReply,
+	reducef func(string, []string) string) {
+
+	done := make(chan struct{})
+	go reduceEmit(reply, reducef, done)
+
+	// check if time out and call feedback to tell coordinator
+	timer(args, reply, done)
+}
+
+func reduceEmit(reply *TaskReply,
+	reducef func(string, []string) string,
+	done chan struct{},
+) {
+
+	// create dest file
+	oname := fmt.Sprintf("mr-out-%d", reply.Task.TaskID)
+	destFile, _ := os.Create(oname)
+	defer destFile.Close()
+
+	// read from tmp files, get sorted kvs
+	intermediate := shuffle(*reply.Task.FileSlice)
+	// write to dest file
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(destFile, "%v %v\n", intermediate[i].Key, output)
+
+		i = j
+	}
+
+	done <- struct{}{}
+}
+
+func shuffle(files []string) []KeyValue {
+	var kva []KeyValue
+	for _, filepath := range files {
+		file, _ := os.Open(filepath)
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			kva = append(kva, kv)
+		}
+		file.Close()
+	}
+	sort.Sort(ByKey(kva))
+	return kva
+}
+
+func timer(args *TaskArgs, reply *TaskReply, done chan struct{}) {
+	// max 10s
+	select {
+	case <-done:
+		reply.Task.Status = taskCompleted
+	case <-time.After(TIMEOUT):
+		// task fail as time out
+		log.Println(">>> times out")
+		reply.Task.Status = taskPending
+		// add fail task to TaskQue
+		// TODO
+		args.Status = false // task failed, worker crashed
+	}
+
+	call("Coordinator.TaskFeedback", args, reply)
+}
+
 // example function to show how to make an RPC call to the coordinator.
 //
 // the RPC argument and reply types are defined in rpc.go.
-//
 func CallExample() {
 
 	// declare an argument structure.
@@ -248,11 +227,9 @@ func CallExample() {
 	}
 }
 
-//
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
-//
 func call(rpcname string, args interface{}, reply interface{}) bool {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	sockname := coordinatorSock()
