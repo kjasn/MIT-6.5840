@@ -29,6 +29,14 @@ const (
 	taskCompleted
 )
 
+type TaskPhrase int
+
+const (
+	MapPhrase TaskPhrase = iota
+	ReducePhrase
+	AllDone
+)
+
 type Task struct {
 	TaskID    int
 	Type      TaskType
@@ -39,73 +47,72 @@ type Task struct {
 
 type Coordinator struct {
 	// Your definitions here.
-	Files         []string // file name
-	Mutex         *sync.Mutex
-	MapTaskQue    chan *Task // store map tasks
-	ReduceTaskQue chan *Task // store reduce tasks
-	Buff          [][]string // map reduce task id to files
-	TaskID        int        // record the next id, start with 0
-	NReduce       int        // count of reduce tasks
-	FinishedMapTasks	int 
-	FinishedReduceTasks      int        // finished reduce tasks
-	Phrase        TaskType   // job phrase, map OR reduce
+	Files               []string // file name
+	Mutex               *sync.Mutex
+	MapTaskQue          chan *Task // store map tasks
+	ReduceTaskQue       chan *Task // store reduce tasks
+	Buff                [][]string // map reduce task id to files
+	TaskID              int        // record the next id, start with 0
+	NReduce             int        // count of reduce tasks
+	FinishedMapTasks    int
+	FinishedReduceTasks int        // finished reduce tasks
+	Phrase              TaskPhrase // job phrase, map, reduce OR all done
 }
 
 // Your code here -- RPC handlers for the worker to call.
-// func (c *Coordinator) selectQue(t TaskType) (chan *Task, error) {
-// 	if t == MapTask {
-// 		if len(c.ReduceTaskQue) == c.NReduce { // all map done
-// 			return nil, fmt.Errorf("all map tasks Done")
-// 		}
-// 		return c.MapTaskQue, nil
-// 	} else {
-// 		if c.Done() { // all (reduce) tasks done
-// 			return nil, fmt.Errorf("all tasks Done")
-// 		}
-// 		return c.ReduceTaskQue, nil
-// 	}
-// }
+func (c *Coordinator) selectTask(success chan *Task) {
+	var task *Task
+	switch c.Phrase {
+	case MapPhrase:
+		task = <-c.MapTaskQue
+	case ReducePhrase:
+		task = <-c.ReduceTaskQue
+	case AllDone:
+		os.Exit(0)
+	default:
+		log.Fatal("illegal task phrase")
+	}
+
+	task.Status = taskAssigned
+	success <- task
+}
 
 func (c *Coordinator) TaskAssign(args *TaskArgs, reply *TaskReply) error {
 	// select a task queue by task type
 	// c.Mutex.Lock()
 	// defer c.Mutex.Unlock()
 	var task *Task
+	success := make(chan *Task)
 
-	if c.Phrase == MapTask {
-		// if len(c.ReduceTaskQue) == c.NReduce { // all map done
-		if c.FinishedMapTasks == len(c.Files){
-			return fmt.Errorf("all map tasks Done")
+	flag := false
+
+	for !flag {
+		go c.selectTask(success)
+
+		select {
+		case task = <-success:
+			flag = true
+		case <-time.After(time.Second):
+			flag = false
 		}
-		task = <-c.MapTaskQue
-	} else {
-		if c.Done() { // all (reduce) tasks done
-			return fmt.Errorf("all tasks Done")
-		}
-		task = <-c.ReduceTaskQue
 	}
 
-	// if len(q) == 0 {
-	// 	return fmt.Errorf("No more task to assign")
-	// }
-	// if len(q) == 0, blocked
-	task.Status = taskAssigned
 	reply.Task = task
 	reply.Phrase = c.Phrase
-	// log.Printf(">>> Assign a task: %#v", *task)
 	return nil
 }
+
 func (c *Coordinator) TaskFeedback(args *TaskArgs, reply *TaskReply) error {
 	if !args.Status { // fail
 		// add failed task back
-		// TODO: delete failed worker tmp files: mr-tmp-reply.Task.TaskID-*
-		if c.Phrase == MapTask {
+		if c.Phrase == MapPhrase {
 			// c.MapTaskQue <- reply.Task
 			c.MapTaskQue <- args.Task
-			log.Printf(">>> Coordinator: map task fail: %#v", args.Task)
+			// log.Printf(">>> Coordinator: map task fail: %#v", args.Task)
 		} else {
+			// c.ReduceTaskQue <- reply.Task
 			c.ReduceTaskQue <- args.Task
-			log.Printf(">>> Coordinator: reduce task fail: %#v", args.Task)
+			// log.Printf(">>> Coordinator: reduce task fail: %#v", args.Task)
 		}
 		// q, _ := c.selectQue(args.Type) // ignore err
 		// q <- reply.Task
@@ -113,29 +120,24 @@ func (c *Coordinator) TaskFeedback(args *TaskArgs, reply *TaskReply) error {
 		c.Mutex.Lock()
 		defer c.Mutex.Unlock()
 		// if args.Type == MapTask {
-		if c.Phrase == MapTask {
+		if c.Phrase == MapPhrase {
 			// set reduce task
-			// fs := []string{}
 			for i := 0; i < c.NReduce; i++ {
 				c.Buff[i] = append(c.Buff[i], fmt.Sprintf("mr-tmp-%d-%d", args.Task.TaskID, i))
 			}
 
 			c.FinishedMapTasks++
-			// if len(c.ReduceTaskQue) == c.NReduce {
 			if c.FinishedMapTasks == len(c.Files) {
-				c.Phrase = ReduceTask // next phrase
-				log.Printf("Step into Reduce Phrase")
+				c.Phrase = ReducePhrase // next phrase
 			}
 		} else {
 			c.FinishedReduceTasks++
+			if c.Done() {
+				// log.Println("All done~")
+				os.Exit(0)
+			}
 		}
 
-		reply.Phrase = c.Phrase
-		if reply.Phrase == MapTask {
-			log.Println("Current is Map Phrase")
-		} else {
-			log.Println("Current is Reduce Phrase")
-		}
 	}
 
 	return nil
@@ -175,16 +177,16 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
-		Files:         files,
-		Mutex:         &sync.Mutex{},
-		MapTaskQue:    make(chan *Task, len(files)),
-		ReduceTaskQue: make(chan *Task, nReduce),
-		Buff:          make([][]string, nReduce),
-		TaskID:        0,
-		NReduce:       nReduce,
-		FinishedReduceTasks:      0,
-		FinishedMapTasks: 0,
-		Phrase:        MapTask,
+		Files:               files,
+		Mutex:               &sync.Mutex{},
+		MapTaskQue:          make(chan *Task, len(files)),
+		ReduceTaskQue:       make(chan *Task, nReduce),
+		Buff:                make([][]string, nReduce),
+		TaskID:              0,
+		NReduce:             nReduce,
+		FinishedReduceTasks: 0,
+		FinishedMapTasks:    0,
+		Phrase:              MapPhrase,
 	}
 
 	// add map tasks
@@ -194,10 +196,9 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 			TaskID:    c.generateID(),
 			FileSlice: &[]string{file}, // 1 file
 			Status:    taskPending,
-			NReduce: c.NReduce,
+			NReduce:   c.NReduce,
 		}
 		c.MapTaskQue <- task
-		// log.Printf("make coordinator add a map task %#v", *c.mapTasks[mapTaskID])
 	}
 
 	// add reduce tasks
@@ -213,4 +214,11 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 	c.server()
 	return &c
+}
+
+// generate UNIQUE ID
+func (c *Coordinator) generateID() int {
+	ret := c.TaskID
+	c.TaskID++
+	return ret
 }

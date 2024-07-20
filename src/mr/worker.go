@@ -40,18 +40,20 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
-	args, reply := &TaskArgs{Status: true}, &TaskReply{}
-	flag := true
-	for flag {
+	for {
+		args, reply := &TaskArgs{Status: true}, &TaskReply{Phrase: MapPhrase} // init
+		// reset phrase during task assigning
+		call("Coordinator.TaskAssign", args, reply)
+
 		switch reply.Phrase {
-		case MapTask:
-			call("Coordinator.TaskAssign", args, reply)
+		case MapPhrase:
 			go doMapTask(args, reply, mapf)
-			log.Printf(">>> after a map task: %#v", reply)
-		case ReduceTask:
-			call("Coordinator.TaskAssign", args, reply)
+		case ReducePhrase:
+			// log.Println(">>> Reduce: start call another task")
+			// log.Printf(">>> get a task: %#v", *reply.Task)
 			go doReduceTask(args, reply, reducef)
-		default:
+
+		case AllDone:
 			os.Exit(0)
 		}
 	}
@@ -60,26 +62,26 @@ func Worker(mapf func(string, string) []KeyValue,
 	// CallExample()
 }
 
-func readFile(filename string) []byte {
-	file, err := os.Open(filename)
-	if err != nil {
-		log.Fatalf("cannot open %v, err: %s", filename, err.Error())
-	}
-	content, err := io.ReadAll(file)
-	if err != nil {
-		log.Fatalf("cannot read %v", filename)
-	}
-	file.Close()
-	return content
-}
-
 func writeToLocalFiles(
 	reply *TaskReply,
 	mapf func(string, string) []KeyValue,
 	done chan struct{},
 ) {
+
+	if reply.Task.FileSlice == nil {
+		log.Fatal("No kvs need to store OR didn't get task")
+	}
 	readFrom := (*reply.Task.FileSlice)[0]
-	content := readFile(readFrom)
+	file, err := os.Open(readFrom)
+	if err != nil {
+		log.Fatalf("cannot open %v", readFrom)
+	}
+	content, err := io.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", readFrom)
+	}
+	file.Close()
+
 	intermediate := mapf(readFrom, string(content))
 
 	sort.Sort(ByKey(intermediate))
@@ -100,21 +102,24 @@ func writeToLocalFiles(
 		ofile, _ := os.Create(oname)
 		// write to temp file in json style
 		enc := json.NewEncoder(ofile)
-		for _, kv := range buff[i] {
-			err := enc.Encode(kv)
-			if err != nil {
-				return
+		for _, kvs := range buff[i] {
+			for _, kv := range kvs {
+				err := enc.Encode(&kv)
+				if err != nil {
+					return
+				}
 			}
 		}
 		ofile.Close()
+		// log.Printf(">>> Map: finish a tmp file: %s", oname)
 	}
 	// successfully finish
 	done <- struct{}{}
-	// log.Printf(">>> Worker: after write: %#v", *reply.Task)
 }
 
 func doMapTask(args *TaskArgs, reply *TaskReply,
-	mapf func(string, string) []KeyValue) {
+	mapf func(string, string) []KeyValue,
+) {
 
 	done := make(chan struct{})
 	go writeToLocalFiles(reply, mapf, done)
@@ -124,7 +129,8 @@ func doMapTask(args *TaskArgs, reply *TaskReply,
 }
 
 func doReduceTask(args *TaskArgs, reply *TaskReply,
-	reducef func(string, []string) string) {
+	reducef func(string, []string) string,
+) {
 
 	done := make(chan struct{})
 	go reduceEmit(reply, reducef, done)
@@ -138,10 +144,12 @@ func reduceEmit(reply *TaskReply,
 	done chan struct{},
 ) {
 
-	// create dest file
-	oname := fmt.Sprintf("mr-out-%d", reply.Task.TaskID)
-	destFile, _ := os.Create(oname)
-	defer destFile.Close()
+	// create tmp file
+	dir, _ := os.Getwd()
+	tempFile, err := os.CreateTemp(dir, "mr-out-tmp-*")
+	if err != nil {
+		log.Fatal("Fail to create tmp file")
+	}
 
 	// read from tmp files, get sorted kvs
 	intermediate := shuffle(*reply.Task.FileSlice)
@@ -159,22 +167,35 @@ func reduceEmit(reply *TaskReply,
 		output := reducef(intermediate[i].Key, values)
 
 		// this is the correct format for each line of Reduce output.
-		fmt.Fprintf(destFile, "%v %v\n", intermediate[i].Key, output)
+		fmt.Fprintf(tempFile, "%v %v\n", intermediate[i].Key, output)
 
 		i = j
 	}
 
+	// rename after done
+	fn := fmt.Sprintf("mr-out-%d", reply.Task.TaskID)
+	os.Rename(tempFile.Name(), fn)
+	// log.Printf("Reduce: finish %s", fn)
 	done <- struct{}{}
 }
 
 func shuffle(files []string) []KeyValue {
+	// log.Printf(">>> start shuffle: %#v\n", files)
+
 	var kva []KeyValue
 	for _, filepath := range files {
-		file, _ := os.Open(filepath)
+		file, err := os.Open(filepath)
+		if err != nil {
+			log.Fatalf("Fail to open %s", filepath)
+		}
 		dec := json.NewDecoder(file)
 		for {
 			var kv KeyValue
 			if err := dec.Decode(&kv); err != nil {
+				if err == io.EOF { // ignore io.EOF
+					break
+				}
+				log.Fatalf("Fail to shuffle: %s", err.Error())
 				break
 			}
 			kva = append(kva, kv)
@@ -190,9 +211,11 @@ func timer(args *TaskArgs, reply *TaskReply, done chan struct{}) {
 	select {
 	case <-done:
 		reply.Task.Status = taskCompleted
+		// log.Printf(">>> a task success: %#v\n", *reply.Task)
 	case <-time.After(TIMEOUT):
 		// task fail as time out
-		log.Println(">>> times out")
+		// log.Println(">>> times out")
+		// log.Printf(">>> a task fail: %#v\n", *reply.Task)
 		reply.Task.Status = taskPending
 		// add fail task to TaskQue
 		// TODO
@@ -200,6 +223,7 @@ func timer(args *TaskArgs, reply *TaskReply, done chan struct{}) {
 	}
 
 	// log.Printf(">>> Worker: before call back, reply's task is: %#v", *reply.Task)
+	// TODO
 	args.Task = reply.Task
 	call("Coordinator.TaskFeedback", args, reply)
 }

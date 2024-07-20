@@ -28,13 +28,12 @@ type ExampleReply struct {
 type TaskArgs struct {
 	// Type   TaskType // map task  OR  reduce task
 	Status bool // serve as if task finished successfully while feedback
-	Task *Task
-	// Phrase TaskType // job phrase, map OR reduce
+	Task   *Task
 }
 
 type TaskReply struct {
 	Task   *Task
-	Phrase TaskType // job phrase, map OR reduce
+	Phrase TaskPhrase // job phrase, map, reduce OR all done
 }
 
 // Cook up a unique-ish UNIX-domain socket name
