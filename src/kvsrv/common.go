@@ -7,10 +7,12 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	// OptionId string
 }
 
 type PutAppendReply struct {
-	Value string
+	Value  string
+	Status RequestStatus
 }
 
 type GetArgs struct {
@@ -19,5 +21,6 @@ type GetArgs struct {
 }
 
 type GetReply struct {
-	Value string
+	Value  string
+	Status RequestStatus
 }
