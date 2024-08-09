@@ -2,10 +2,7 @@ package kvsrv
 
 import (
 	"crypto/rand"
-	"log"
 	"math/big"
-	"sync"
-	"time"
 
 	"6.5840/labrpc"
 )
@@ -13,9 +10,14 @@ import (
 type Clerk struct {
 	server *labrpc.ClientEnd
 	// You will have to modify this struct.
-	mu        sync.Mutex
-	requestId int
 }
+
+type RequestType int
+
+const (
+	Modify RequestType = iota
+	DeleteCache
+)
 
 func nrand() int64 {
 	max := big.NewInt(int64(1) << 62)
@@ -28,8 +30,6 @@ func MakeClerk(server *labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.server = server
 	// You'll have to add code here.
-	ck.mu = sync.Mutex{}
-	ck.requestId = 0
 	return ck
 }
 
@@ -46,13 +46,8 @@ func MakeClerk(server *labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	args, reply := GetArgs{Key: key}, GetReply{Status: RequestNotExist}
-	for reply.Status != RequestCompleted {
-		ck.server.Call("KVServer.Get", &args, &reply)
-		if reply.Status != RequestCompleted {
-			log.Println("[CLIENT INFO] Fail to get key from server, retry in 1s ...")
-			time.Sleep(1 * time.Second)
-		}
+	args, reply := GetArgs{Key: key}, GetReply{}
+	for !ck.server.Call("KVServer.Get", &args, &reply) {
 	}
 	return reply.Value
 }
@@ -67,18 +62,26 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) string {
 	// You will have to modify this function.
+	randID := nrand()
+
 	args := PutAppendArgs{
-		Key:   key,
-		Value: value,
-		// OptionId: op + "_" + strconv.Itoa(ck.generateId()),
+		Key:      key,
+		Value:    value,
+		OptionId: randID,
+		Type:     Modify,
 	}
-	reply := PutAppendReply{Status: RequestNotExist}
-	for reply.Status != RequestCompleted {
-		ck.server.Call("KVServer."+op, &args, &reply)
-		if reply.Status != RequestCompleted {
-			log.Printf("[CLIENT INFO] Fail to %v key to server, retry in 1s ...", op)
-			time.Sleep(1 * time.Second)
-		}
+
+	reply := PutAppendReply{}
+	for !ck.server.Call("KVServer."+op, &args, &reply) {
+	}
+
+	// delete successful option's cache, in case of exceeding the memory limit
+	args = PutAppendArgs{
+		OptionId: randID,
+		Type:     DeleteCache,
+	}
+
+	for !ck.server.Call("KVServer."+op, &args, &reply) {
 	}
 	return reply.Value
 }
@@ -90,11 +93,4 @@ func (ck *Clerk) Put(key string, value string) {
 // Append value to key's value and return that value
 func (ck *Clerk) Append(key string, value string) string {
 	return ck.PutAppend(key, value, "Append")
-}
-
-func (ck *Clerk) generateId() int {
-	ck.mu.Lock()
-	defer ck.mu.Unlock()
-	ck.requestId++
-	return ck.requestId
 }
