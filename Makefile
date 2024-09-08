@@ -28,28 +28,29 @@ LABS=" lab1 lab2 lab3a lab3b lab3c lab3d lab4a lab4b lab5a lab5b "
 		echo "Bad target $@. Usage: make [$(LABS)]"; \
 	fi
 
-.PHONY: check-% plugin coordinator worker test clean res
+.PHONY: check-% plugin coordinator worker test clean cmp
 check-%:
 	@echo "Checking that your submission builds correctly..."
 	@./.check-build git://g.csail.mit.edu/6.5840-golabs-2024 $(patsubst check-%,%,$@)
 
 plugin:
-	cd src/main && go build -buildmode=plugin ../mrapps/crash.go
+	cd src/main && go build -buildmode=plugin ../mrapps/wc.go
 
 coordinator: plugin clean
 	cd src/main && go run mrcoordinator.go pg-*.txt 
 
-worker: 
-	cd src/main && go run mrworker.go crash.so 
+worker: clean
+	cd src/main && go run mrworker.go wc.so 
 
 test:
 	cd src/main && bash test-mr.sh
 
+manytest:
+	cd src/main && bash test-mr-many.sh ${n}
+
 clean:
-	@echo "Cleaning up files..."
 	@rm -f src/main/mr-tmp-*
 	@rm -f src/main/mr-out*
-	@echo "Cleanup complete."
 
-res:
+cmp:
 	cat src/main/mr-out-* | sort | more

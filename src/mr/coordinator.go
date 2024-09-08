@@ -1,12 +1,13 @@
 package mr
 
 import (
-	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"net/rpc"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -34,6 +35,7 @@ type TaskPhrase int
 const (
 	MapPhrase TaskPhrase = iota
 	ReducePhrase
+	TaskWaiting
 	AllDone
 )
 
@@ -41,17 +43,17 @@ type Task struct {
 	TaskID    int
 	Type      TaskType
 	Status    TaskStatus
-	FileSlice *[]string // 1 -- map task, more -- reduce task
+	FileSlice []string // 1 -- map task, more -- reduce task
 	NReduce   int
 }
 
 type Coordinator struct {
 	// Your definitions here.
-	Files               []string // file name
-	Mutex               *sync.Mutex
+	Files []string // file name
+	// Mutex sync.Mutex
+	Mutex               sync.RWMutex
 	MapTaskQue          chan *Task // store map tasks
 	ReduceTaskQue       chan *Task // store reduce tasks
-	Buff                [][]string // map reduce task id to files
 	TaskID              int        // record the next id, start with 0
 	NReduce             int        // count of reduce tasks
 	FinishedMapTasks    int
@@ -60,81 +62,80 @@ type Coordinator struct {
 }
 
 // Your code here -- RPC handlers for the worker to call.
-func (c *Coordinator) selectTask(success chan *Task) {
-	var task *Task
+func (c *Coordinator) TaskAssign(args *TaskArgs, reply *TaskReply) error {
+	c.Mutex.Lock()
+	defer c.Mutex.Unlock()
+
+	reply.Phrase = c.Phrase
 	switch c.Phrase {
 	case MapPhrase:
-		task = <-c.MapTaskQue
+		if len(c.MapTaskQue) > 0 {
+			reply.Task = <-c.MapTaskQue
+		} else {
+			reply.Phrase = TaskWaiting
+		}
+
 	case ReducePhrase:
-		task = <-c.ReduceTaskQue
+		if len(c.ReduceTaskQue) > 0 {
+			reply.Task = <-c.ReduceTaskQue
+		} else {
+			reply.Phrase = TaskWaiting
+		}
 	case AllDone:
-		os.Exit(0)
-	default:
-		log.Fatal("illegal task phrase")
+		reply.Phrase = AllDone
 	}
 
-	task.Status = taskAssigned
-	success <- task
+	return nil
 }
 
-func (c *Coordinator) TaskAssign(args *TaskArgs, reply *TaskReply) error {
-	// select a task queue by task type
-	// c.Mutex.Lock()
-	// defer c.Mutex.Unlock()
-	var task *Task
-	success := make(chan *Task)
-
-	flag := false
-
-	for !flag {
-		go c.selectTask(success)
-
-		select {
-		case task = <-success:
-			flag = true
-		case <-time.After(time.Second):
-			flag = false
+// add reduce tasks to reduce task queue after all map done
+func (c *Coordinator) addReduceTask(seq int) {
+	var s []string
+	path, _ := os.Getwd()
+	files, _ := os.ReadDir(path)
+	for _, file := range files {
+		// collect all tmp file by map task,  mr-tmp-*-{seq}
+		if strings.HasPrefix(file.Name(), "mr-tmp") && strings.HasSuffix(file.Name(), strconv.Itoa(seq)) {
+			s = append(s, file.Name())
 		}
 	}
-
-	reply.Task = task
-	reply.Phrase = c.Phrase
-	return nil
+	task := &Task{
+		TaskID:    c.generateID(),
+		Type:      ReduceTask,
+		Status:    taskPending,
+		FileSlice: s,
+		NReduce:   c.NReduce,
+	}
+	c.ReduceTaskQue <- task
 }
 
 func (c *Coordinator) TaskFeedback(args *TaskArgs, reply *TaskReply) error {
 	if !args.Status { // fail
 		// add failed task back
 		if c.Phrase == MapPhrase {
-			// c.MapTaskQue <- reply.Task
-			c.MapTaskQue <- args.Task
-			// log.Printf(">>> Coordinator: map task fail: %#v", args.Task)
+			c.MapTaskQue <- reply.Task
+			log.Printf(">>> Coordinator: map task fail: %#v", reply.Task)
 		} else {
-			// c.ReduceTaskQue <- reply.Task
-			c.ReduceTaskQue <- args.Task
-			// log.Printf(">>> Coordinator: reduce task fail: %#v", args.Task)
+			c.ReduceTaskQue <- reply.Task
+			log.Printf(">>> Coordinator: reduce task fail: %#v", reply.Task)
 		}
-		// q, _ := c.selectQue(args.Type) // ignore err
-		// q <- reply.Task
 	} else { // success
 		c.Mutex.Lock()
 		defer c.Mutex.Unlock()
-		// if args.Type == MapTask {
 		if c.Phrase == MapPhrase {
-			// set reduce task
-			for i := 0; i < c.NReduce; i++ {
-				c.Buff[i] = append(c.Buff[i], fmt.Sprintf("mr-tmp-%d-%d", args.Task.TaskID, i))
-			}
-
 			c.FinishedMapTasks++
 			if c.FinishedMapTasks == len(c.Files) {
+				// add reduce tasks
+				for i := 0; i < c.NReduce; i++ {
+					c.addReduceTask(i)
+				}
 				c.Phrase = ReducePhrase // next phrase
+				// log.Println("[INFO] Map tasks all done, enter into reduce phrase")
 			}
 		} else {
 			c.FinishedReduceTasks++
-			if c.Done() {
-				// log.Println("All done~")
-				os.Exit(0)
+			if c.FinishedReduceTasks == c.NReduce {
+				log.Println("[INFO] All done~")
 			}
 		}
 
@@ -169,6 +170,10 @@ func (c *Coordinator) server() {
 // if the entire job has taskCompleted.
 func (c *Coordinator) Done() bool {
 	// Your code here.
+	c.Mutex.RLock()
+	defer c.Mutex.RUnlock()
+	// c.Mutex.Lock()
+	// defer c.Mutex.Unlock()
 	return c.FinishedReduceTasks == c.NReduce
 }
 
@@ -177,11 +182,11 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
-		Files:               files,
-		Mutex:               &sync.Mutex{},
+		Files: files,
+		// Mutex:               sync.RWMutex{},
+		Mutex:               sync.RWMutex{},
 		MapTaskQue:          make(chan *Task, len(files)),
 		ReduceTaskQue:       make(chan *Task, nReduce),
-		Buff:                make([][]string, nReduce),
 		TaskID:              0,
 		NReduce:             nReduce,
 		FinishedReduceTasks: 0,
@@ -192,24 +197,13 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	// add map tasks
 	for _, file := range c.Files {
 		task := &Task{
-			Type:      MapTask,
 			TaskID:    c.generateID(),
-			FileSlice: &[]string{file}, // 1 file
+			Type:      MapTask,
 			Status:    taskPending,
+			FileSlice: []string{file}, // 1 file
 			NReduce:   c.NReduce,
 		}
 		c.MapTaskQue <- task
-	}
-
-	// add reduce tasks
-	for i := 0; i < c.NReduce; i++ {
-		task := &Task{
-			TaskID:    c.generateID(),
-			Type:      ReduceTask,
-			Status:    taskPending,
-			FileSlice: &c.Buff[i],
-		}
-		c.ReduceTaskQue <- task
 	}
 
 	c.server()

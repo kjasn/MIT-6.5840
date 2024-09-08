@@ -42,17 +42,17 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 	for {
 		args, reply := &TaskArgs{Status: true}, &TaskReply{Phrase: MapPhrase} // init
-		// reset phrase during task assigning
+		// get tasks, return a task OR enter TaskWaiting
 		call("Coordinator.TaskAssign", args, reply)
 
 		switch reply.Phrase {
 		case MapPhrase:
 			go doMapTask(args, reply, mapf)
 		case ReducePhrase:
-			// log.Println(">>> Reduce: start call another task")
-			// log.Printf(">>> get a task: %#v", *reply.Task)
 			go doReduceTask(args, reply, reducef)
-
+		case TaskWaiting:
+			// log.Println("[INFO] In progressing...")
+			time.Sleep(1 * time.Second)
 		case AllDone:
 			os.Exit(0)
 		}
@@ -68,10 +68,7 @@ func writeToLocalFiles(
 	done chan struct{},
 ) {
 
-	if reply.Task.FileSlice == nil {
-		log.Fatal("No kvs need to store OR didn't get task")
-	}
-	readFrom := (*reply.Task.FileSlice)[0]
+	readFrom := reply.Task.FileSlice[0]
 	file, err := os.Open(readFrom)
 	if err != nil {
 		log.Fatalf("cannot open %v", readFrom)
@@ -84,16 +81,15 @@ func writeToLocalFiles(
 
 	intermediate := mapf(readFrom, string(content))
 
-	sort.Sort(ByKey(intermediate))
+	// sort.Sort(ByKey(intermediate))
 	// write intermediate kvs to local file
-	// buff := map[int]ByKey{}
 	nReduce := reply.Task.NReduce
 	// store temp kvs to write to temp files
-	buff := make([][]ByKey, nReduce)
+	buff := make([][]KeyValue, nReduce)
 
 	for _, kv := range intermediate {
 		idx := ihash(kv.Key) % nReduce
-		buff[idx] = append(buff[idx], ByKey{kv})
+		buff[idx] = append(buff[idx], kv)
 	}
 
 	for i := 0; i < nReduce; i++ {
@@ -102,12 +98,11 @@ func writeToLocalFiles(
 		ofile, _ := os.Create(oname)
 		// write to temp file in json style
 		enc := json.NewEncoder(ofile)
-		for _, kvs := range buff[i] {
-			for _, kv := range kvs {
-				err := enc.Encode(&kv)
-				if err != nil {
-					return
-				}
+		for _, kv := range buff[i] {
+			err := enc.Encode(&kv)
+			if err != nil {
+				log.Fatal("[ERROR] Fail to encode")
+				return
 			}
 		}
 		ofile.Close()
@@ -126,6 +121,7 @@ func doMapTask(args *TaskArgs, reply *TaskReply,
 
 	// check if time out and call feedback to tell coordinator
 	timer(args, reply, done)
+	// log.Println("[INFO] Finished a map task")
 }
 
 func doReduceTask(args *TaskArgs, reply *TaskReply,
@@ -146,13 +142,13 @@ func reduceEmit(reply *TaskReply,
 
 	// create tmp file
 	dir, _ := os.Getwd()
-	tempFile, err := os.CreateTemp(dir, "mr-out-tmp-*")
+	tempFile, err := os.CreateTemp(dir, "mr-reduce-out-*")
 	if err != nil {
-		log.Fatal("Fail to create tmp file")
+		log.Fatal("[ERROR] Fail to create tmp file")
 	}
 
 	// read from tmp files, get sorted kvs
-	intermediate := shuffle(*reply.Task.FileSlice)
+	intermediate := shuffle(reply.Task.FileSlice)
 	// write to dest file
 	i := 0
 	for i < len(intermediate) {
@@ -171,17 +167,19 @@ func reduceEmit(reply *TaskReply,
 
 		i = j
 	}
+	tempFile.Close()
 
 	// rename after done
 	fn := fmt.Sprintf("mr-out-%d", reply.Task.TaskID)
-	os.Rename(tempFile.Name(), fn)
+	err = os.Rename(tempFile.Name(), fn)
+	if err != nil {
+		log.Fatalf("[ERROR] Fail to rename %s, error: %s", tempFile.Name(), err.Error())
+	}
 	// log.Printf("Reduce: finish %s", fn)
 	done <- struct{}{}
 }
 
 func shuffle(files []string) []KeyValue {
-	// log.Printf(">>> start shuffle: %#v\n", files)
-
 	var kva []KeyValue
 	for _, filepath := range files {
 		file, err := os.Open(filepath)
@@ -210,21 +208,18 @@ func timer(args *TaskArgs, reply *TaskReply, done chan struct{}) {
 	// max 10s
 	select {
 	case <-done:
+		args.Status = true
 		reply.Task.Status = taskCompleted
-		// log.Printf(">>> a task success: %#v\n", *reply.Task)
 	case <-time.After(TIMEOUT):
-		// task fail as time out
-		// log.Println(">>> times out")
-		// log.Printf(">>> a task fail: %#v\n", *reply.Task)
+		// task fail since time out
 		reply.Task.Status = taskPending
+		log.Printf("[INFO] Task: %#v failed", reply.Task)
 		// add fail task to TaskQue
 		// TODO
 		args.Status = false // task failed, worker crashed
 	}
 
-	// log.Printf(">>> Worker: before call back, reply's task is: %#v", *reply.Task)
 	// TODO
-	args.Task = reply.Task
 	call("Coordinator.TaskFeedback", args, reply)
 }
 

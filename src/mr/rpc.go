@@ -28,7 +28,6 @@ type ExampleReply struct {
 type TaskArgs struct {
 	// Type   TaskType // map task  OR  reduce task
 	Status bool // serve as if task finished successfully while feedback
-	Task   *Task
 }
 
 type TaskReply struct {
