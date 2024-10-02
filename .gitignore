@@ -9,3 +9,6 @@ api.key
 # output files
 mr-out-*
 mr-tmp-*
+
+# docs
+doc/
