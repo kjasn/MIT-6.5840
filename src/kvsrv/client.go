@@ -1,14 +1,23 @@
 package kvsrv
 
-import "6.5840/labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
 
+	"6.5840/labrpc"
+)
 
 type Clerk struct {
 	server *labrpc.ClientEnd
 	// You will have to modify this struct.
 }
+
+type RequestType int
+
+const (
+	Modify RequestType = iota
+	DeleteCache
+)
 
 func nrand() int64 {
 	max := big.NewInt(int64(1) << 62)
@@ -37,7 +46,10 @@ func MakeClerk(server *labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	return ""
+	args, reply := GetArgs{Key: key}, GetReply{}
+	for !ck.server.Call("KVServer.Get", &args, &reply) {
+	}
+	return reply.Value
 }
 
 // shared by Put and Append.
@@ -50,7 +62,28 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) string {
 	// You will have to modify this function.
-	return ""
+	randID := nrand()
+
+	args := PutAppendArgs{
+		Key:      key,
+		Value:    value,
+		OptionId: randID,
+		Type:     Modify,
+	}
+
+	reply := PutAppendReply{}
+	for !ck.server.Call("KVServer."+op, &args, &reply) {
+	}
+
+	// delete successful option's cache, in case of exceeding the memory limit
+	args = PutAppendArgs{
+		OptionId: randID,
+		Type:     DeleteCache,
+	}
+
+	for !ck.server.Call("KVServer."+op, &args, &reply) {
+	}
+	return reply.Value
 }
 
 func (ck *Clerk) Put(key string, value string) {
